@@ -3,17 +3,27 @@ This GCS setup (i.e. `gcs` resource definition) needs other resource definitions
 - `k8s-service-account`
 - `gcp-service-account`
 - `config`
+- `aws-policy` (temporary, by waiting for `gcp-iam-member`)
+
+```mermaid
+graph LR
+  workload -- score --> gcs
+  gcs -- co-provisions -->  aws-policy
+  aws-policy -- references --> gcs
+  workload -- references --> k8s-service-account
+  k8s-service-account -- references --> google-service-account
+  google-service-account -- selects --> aws-policy
+```
+
+More tests and scenarios could be found [here](./tests/).
 
 Remaining tasks:
-- Test with shared GCS
-- Test with Operator
-- Change the GSA name, needs to be `workload-k8s-namespace` format for unicity
-- Optimize the resource graph (2 `configs` instead of 1 and 3 `k8s-service-accounts` instead of 1)
-- Remove the `gsa` in Score, Dev shouldn't provide this
-
-Current resource graph:
-
-![](resource-graph.png)
+- Test with shared GCS between 2 Workloads
+- Support read versus write roles
+- Test with Workload with Spanner and GCS
+- Test with Operator (`k8s-cluster` and `k8s-namespace` refs won't work)
+- ksa name in GSA (for WI binding) is assuming that this is the Workload name...
+- Change `aws-policy` by associated new GCP resource type (`gcp-iam-member`?)
 
 ```bash
 cd resources/gcs-full
@@ -112,16 +122,12 @@ entity:
   criteria:
     - app_id: ${APP}
       env_id: ${ENVIRONMENT}
-      class: default
-    - app_id: ${APP}
-      env_id: ${ENVIRONMENT}
-      class: workload-identity
+      res_id: app-config
 EOF
 
-humctl create \
+humctl apply \
     -f ${APP}-${ENVIRONMENT}-config.yaml
 ```
-_Note: we need to add a matching criteria with `class: workload-identity` in addition to the `default` one because this `config` will be called by the `k8s-service-account` explicitly defined in Score with this `class: workload-identity`._
 
 ### Create the `gcs` resource definition
 
@@ -141,22 +147,51 @@ entity:
       append_logs_to_error: true
       source:
         path: resources/gcs-full
-        rev: refs/heads/main
+        rev: refs/heads/rework
         url: https://github.com/Humanitec-DemoOrg/google-cloud-reference-architecture.git
       variables:
-        project_id: \${resources.config.outputs.project_id}
-        region: \${resources.config.outputs.region}
-        namespace: \${resources.k8s-namespace.outputs.namespace}
-        gsa_email: \${resources.gcp-service-account.outputs.email}
+        project_id: \${resources['config.default#app-config'].outputs.project_id}
+        region: \${resources['config.default#app-config'].outputs.region}
     secrets:
       variables:
-        credentials: \${resources.config.outputs.credentials}
+        credentials: \${resources['config.default#app-config'].outputs.credentials}
+  provision:
+    aws-policy:
+      is_dependent: false
+      match_dependents: true
   criteria:
     - {}
 EOF
 
 humctl apply \
     -f gcs-full.yaml
+```
+
+### Create the `aws-policy` resource definition
+
+```bash
+cat <<EOF > gcs-admin-iam-member.yaml
+apiVersion: entity.humanitec.io/v1b1
+kind: Definition
+metadata:
+  id: gcs-admin-iam-member
+entity:
+  name: gcs-admin-iam-member
+  type: aws-policy
+  driver_type: humanitec/template
+  driver_inputs:
+    values:
+      templates:
+        outputs: |
+          scope: "gcs"
+          resource_name: \${resources.gcs.outputs.name}
+          role: "roles/storage.admin"
+  criteria:
+  - {}
+EOF
+
+humctl apply \
+    -f gcs-admin-iam-member.yaml
 ```
 
 ### Create the `gcp-service-account` resource definition
@@ -176,23 +211,26 @@ entity:
       append_logs_to_error: true
       source:
         path: resources/gsa
-        rev: refs/heads/main
+        rev: refs/heads/rework
         url: https://github.com/Humanitec-DemoOrg/google-cloud-reference-architecture.git
       variables:
-        project_id: \${resources.config.outputs.project_id}
+        project_id: \${resources['config.default#app-config'].outputs.project_id}
+        iam_members:
+          scopes: \${resources.workload>aws-policy.outputs.scope}
+          resource_names: \${resources.workload>aws-policy.outputs.resource_name}
+          roles: \${resources.workload>aws-policy.outputs.role}
         res_id: \${context.res.id}
         workload_identity:
           gke_project_id: \${resources.k8s-cluster.outputs.project_id}
           namespace: \${resources.k8s-namespace.outputs.namespace}
-          ksa: \${resources.k8s-service-account.outputs.name}
     secrets:
       variables:
-        credentials: \${resources.config.outputs.credentials}
+        credentials: \${resources['config.default#app-config'].outputs.credentials}
   criteria:
     - {}
 EOF
 
-humctl create \
+humctl apply \
     -f gsa.yaml
 ```
 
@@ -215,31 +253,30 @@ entity:
           update:
             - op: add
               path: /spec/serviceAccountName
-              value: \${resources.k8s-service-account.outputs.name}
+              value: \${resources['k8s-service-account'].outputs.name}
   criteria:
     - {}
 EOF
 
-humctl create \
+humctl apply \
     -f custom-workload.yaml
 ```
-_Note: we are making a decision here to have a Kubernetes `ServiceAccount` per Workload, for any Workloads. See next section to see how this `ServiceAccount` is created._
 
-### Create the `k8s-service-account` resource definitions
+### Create the `k8s-service-account` resource definition
 
-By default, for any Workload, we create a dedicated `ServiceAccount`:
 ```bash
-cat <<EOF > service-account.yaml
+cat <<EOF > custom-service-account.yaml
 apiVersion: entity.humanitec.io/v1b1
 kind: Definition
 metadata:
-  id: service-account
+  id: custom-service-account
 entity:
-  name: service-account
+  name: custom-service-account
   type: k8s-service-account
   driver_type: humanitec/template
   driver_inputs:
     values:
+      roleBindingsArray: \${resources.workload>aws-policy.outputs.resource_name}
       templates:
         init: |
           name: {{ index (regexSplit "\\\\." "\$\${context.res.id}" -1) 1 }}
@@ -250,6 +287,10 @@ entity:
               apiVersion: v1
               kind: ServiceAccount
               metadata:
+                {{- if len .driver.values.roleBindingsArray }}
+                annotations:
+                  iam.gke.io/gcp-service-account: \${resources.gcp-service-account.outputs.email}
+                {{- end }}
                 name: {{ .init.name }}
         outputs: |
           name: {{ .init.name }}
@@ -257,56 +298,6 @@ entity:
     - {}
 EOF
 
-humctl create \
-    -f service-account.yaml
-```
-
-Now, for any `k8s-service-account` explicitly defined with `class: workload-identity`, we will define this `ServiceAccount` with the Workload Identity annotation:
-```bash
-cat <<EOF > service-account-with-workload-identity.yaml
-apiVersion: entity.humanitec.io/v1b1
-kind: Definition
-metadata:
-  id: service-account-with-workload-identity
-entity:
-  name: service-account-with-workload-identity
-  type: k8s-service-account
-  driver_type: humanitec/template
-  driver_inputs:
-    values:
-      templates:
-        init: |
-          name: {{ index (regexSplit "\\\\." "\$\${context.res.id}" -1) 1 }}
-        manifests: |-
-          service-account.yaml:
-            location: namespace
-            data:
-              apiVersion: v1
-              kind: ServiceAccount
-              metadata:
-                annotations:
-                  iam.gke.io/gcp-service-account: {{ .init.name }}-gsa@\${resources.config.outputs.project_id}.iam.gserviceaccount.com
-                name: {{ .init.name }}
-        outputs: |
-          name: {{ .init.name }}
-  criteria:
-    - class: workload-identity
-EOF
-
-humctl create \
-    -f service-account-with-workload-identity.yaml
-```
-_Note: the value of the annotation `iam.gke.io/gcp-service-account` is kind of hard-coded with `{{ .init.name }}-gsa@\${resources.config.outputs.project_id}.iam.gserviceaccount.com` instead of `\${resources.gcp-service-account.outputs.email}` because with the later I'm getting a dependency cycle error between both the ksa and the gsa._
-
-## Deploy the sample app using this GCS setup
-
-```bash
-score-humanitec delta \
-    --app ${APP} \
-    --env ${ENVIRONMENT} \
-    --org ${HUMANITEC_ORG} \
-    --token ${HUMANITEC_TOKEN} \
-    --deploy \
-    --retry \
-    -f score.yaml
+humctl apply \
+    -f custom-service-account.yaml
 ```

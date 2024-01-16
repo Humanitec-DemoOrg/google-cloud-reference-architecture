@@ -1,0 +1,6 @@
+apiVersion: score.dev/v1b1
+metadata:
+  name: no-gcs-workload
+containers:
+  no-gcs-workload:
+    image: stefanprodan/podinfo:latest

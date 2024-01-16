@@ -13,14 +13,3 @@ variable "region" {
   description = "The region of the GCS bucket."
   type        = string
 }
-
-variable "gsa_email" {
-  description = "The email address of the GCP Service Account accessing the GCS bucket."
-  type        = string
-}
-
-variable "gcs_role" {
-  description = "The role to assign to the GCP Service Account accessing the GCS bucket."
-  type        = string
-  default     = "roles/storage.admin"
-}

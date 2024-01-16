@@ -19,14 +19,18 @@ variable "workload_identity" {
   type = object({
     gke_project_id  = string
     namespace       = string
-    ksa             = string
   })
   sensitive = true
   default   = null
 }
 
-variable "roles" {
-  description = "List of roles to assign to the GSA."
-  type        = set(string)
-  default     = []
+variable "iam_members" {
+  description = "The lists (scopes, resource_names and roles) for the IAM Role bindings to assign to the GSA."
+  type = object({
+    scopes          = list(string)
+    resource_names  = list(string)
+    roles           = list(string)
+  })
+  sensitive = true
+  default   = null
 }

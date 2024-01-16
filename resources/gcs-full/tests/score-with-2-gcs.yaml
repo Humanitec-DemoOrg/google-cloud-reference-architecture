@@ -1,13 +1,13 @@
 apiVersion: score.dev/v1b1
 metadata:
-  name: gcs-workload
+  name: two-gcs-workload
 containers:
-  gcs-workload:
+  two-gcs-workload:
     image: registry.humanitec.io/public/resource-pack-tester
     command: ["/opt/service/gcsapp"]
     variables:
       PORT: "3000"
-      BUCKET_NAME: ${resources.gcs.name}
+      BUCKET_NAME: ${resources.gcs-1.name}
     livenessProbe:
       httpGet:
         path: /health
@@ -22,8 +22,7 @@ service:
       port: 3000
       targetPort: 3000
 resources:
-  gcs:
+  gcs-1:
     type: gcs
-  service-account:
-    type: k8s-service-account
-    class: workload-identity
+  gcs-2:
+    type: gcs

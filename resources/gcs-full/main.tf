@@ -11,10 +11,3 @@ resource "google_storage_bucket" "bucket" {
   location      = var.region
   force_destroy = true
 }
-
-# https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket_iam
-resource "google_storage_bucket_iam_member" "admin" {
-  bucket = google_storage_bucket.bucket.name
-  role   = var.gcs_role
-  member = "serviceAccount:${var.gsa_email}"
-}
